@@ -12,7 +12,7 @@ const argv = yargs(hideBin(process.argv))
   .option('broker', {
     describe: 'MQTT broker URL',
     type: 'string',
-    default: 'mqtt://localhost:1883',
+    default: 'mqtt://10.17.10.222:1883',
   })
   .option('username', {
     describe: 'MQTT username (omit or empty for none)',
@@ -33,7 +33,7 @@ const argv = yargs(hideBin(process.argv))
     describe: 'QoS level (0, 1, or 2)',
     type: 'number',
     choices: [0, 1, 2],
-    default: 1,
+    default: 2,
   })
   .option('groups', {
     describe: 'Number of shared‐subscription groups',
@@ -370,8 +370,8 @@ CSV report: ${csvReportPath}
     // ——————————————————————————————————————————
     // 3.4) WAIT FOR IN‐FLIGHT DELIVERIES
     // ——————————————————————————————————————————
-    console.log('\nWaiting 10 seconds for in‐flight deliveries…');
-    await new Promise((r) => setTimeout(r, 10000));
+    console.log('\nWaiting 5 seconds for in‐flight deliveries…');
+    await new Promise((r) => setTimeout(r, 5000));
 
     // ——————————————————————————————————————————
     // 3.5) VERIFY “EXACTLY ONCE” PER GROUP & BUILD CSV
