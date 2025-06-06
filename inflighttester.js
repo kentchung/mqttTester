@@ -12,7 +12,7 @@ const argv = yargs(hideBin(process.argv))
   .option('broker', {
     describe: 'MQTT broker URL',
     type: 'string',
-    default: 'mqtt://localhost:1883',
+    default: 'mqtt://10.17.10.222:1883',
   })
   .option('username', {
     describe: 'MQTT username (omit or empty for none)',
@@ -27,7 +27,7 @@ const argv = yargs(hideBin(process.argv))
   .option('topic', {
     describe: 'Topic to publish/subscribe',
     type: 'string',
-    default: 'test/topic',
+    default: 'testtopic/test',
   })
   .option('qos', {
     describe: 'QoS level (0, 1, or 2)',
@@ -38,12 +38,12 @@ const argv = yargs(hideBin(process.argv))
   .option('sessionExpiry', {
     describe: 'Session expiry interval (seconds) for subscribers',
     type: 'number',
-    default: 300,
+    default: 5,
   })
   .option('subs', {
     describe: 'Number of subscribers',
     type: 'number',
-    default: 2,
+    default: 40,
   })
   .option('publishers', {
     describe: 'Number of publishers',
@@ -53,7 +53,7 @@ const argv = yargs(hideBin(process.argv))
   .option('messagesPerPub', {
     describe: 'Number of messages per publisher',
     type: 'number',
-    default: 10,
+    default: 20,
   })
   .option('logFile', {
     describe: 'Path to save log file',
@@ -118,29 +118,27 @@ async function runInflightTest() {
     const halfwayCount = Math.floor(totalMessages / 3);
 
     if (numSubs < 1 || numPublishers < 1) {
-      console.error(
-        'Error: --subs and --publishers must both be ≥ 1.'
-      );
+      console.error('Error: --subs and --publishers must both be ≥ 1.');
       process.exit(1);
     }
 
     console.log(`
 Test Configuration:
-  - Broker URL:            ${brokerUrl}
-  - Username / Password:   ${username || '<none>'} / ${password ? '******' : '<none>'}
-  - Topic:                 ${topic}
-  - QoS:                   ${qos}
-  - Session Expiry:        ${sessionExpiry}s
-  - Subscribers:           ${numSubs}
-  - Publishers:            ${numPublishers}
-  - Messages Per Publisher:${messagesPerPub}
-  
+  - Broker URL:             ${brokerUrl}
+  - Username / Password:    ${username || '<none>'} / ${password ? '******' : '<none>'}
+  - Topic:                  ${topic}
+  - QoS:                    ${qos}
+  - Session Expiry:         ${sessionExpiry}s
+  - Subscribers:            ${numSubs}
+  - Publishers:             ${numPublishers}
+  - Messages Per Publisher: ${messagesPerPub}
+
 Log file: ${logFilePath}
 CSV report: ${csvReportPath}
     `);
 
     // Track received messages per subscriber
-    // Map< clientId, Set<payloadString> >
+    // Map< clientId, Set< `${pubId}:${seq}` > >
     const receivedMap = new Map();
     for (let i = 0; i < numSubs; i++) {
       const clientId = `sub-${i}`;
@@ -148,7 +146,8 @@ CSV report: ${csvReportPath}
     }
 
     // Hold subscriber client objects
-    const subscribers = []; // { clientId, client }
+    // Each element: { clientId, client }
+    const subscribers = [];
 
     // Common event listeners
     function attachClientLogging(client, type, clientId) {
@@ -159,7 +158,7 @@ CSV report: ${csvReportPath}
         console.log(`${type} ${clientId} RECONNECTING...`);
       });
       client.on('close', () => {
-        // console.log(`${type} ${clientId} CONNECTION CLOSED`);
+        // Connection closed
       });
       client.on('packetsend', (packet) => {
         // no-op
@@ -169,9 +168,9 @@ CSV report: ${csvReportPath}
       });
     }
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.1) CREATE SUBSCRIBERS WITH PERSISTENT SESSION
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log('Initializing subscribers…');
 
     for (let i = 0; i < numSubs; i++) {
@@ -202,9 +201,21 @@ CSV report: ${csvReportPath}
 
       subscriber.on('message', (_topic, payloadBuf) => {
         const payload = payloadBuf.toString().trim();
-        const set = receivedMap.get(clientId);
-        set.add(payload);
-        console.log(`Subscriber ${clientId} RECEIVED: "${payload}"`);
+        // Extract publisher and sequence: "MSG from pub-0 #3" → pub-0, 3
+        const match = payload.match(/^MSG from (pub-\d+) #(\d+)$/);
+        if (match) {
+          const pubId = match[1];
+          const seq = match[2];
+          const indexKey = `${pubId}:${seq}`;
+          const set = receivedMap.get(clientId);
+          set.add(indexKey);
+          console.log(`Subscriber ${clientId} RECEIVED: "${payload}" (indexed as ${indexKey})`);
+        } else {
+          // Fallback: store the whole payload string
+          const set = receivedMap.get(clientId);
+          set.add(payload);
+          console.log(`Subscriber ${clientId} RECEIVED unexpected format: "${payload}"`);
+        }
       });
 
       subscribers.push({ clientId, client: subscriber });
@@ -225,14 +236,13 @@ CSV report: ${csvReportPath}
     console.log('All subscribers are subscribed.');
 
     // Small delay to ensure broker registration
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2000));
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.2) CREATE PUBLISHERS
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log('Initializing publishers…');
-    const publishers = []; // { clientId, client }
-
+    const publishers = [];
     for (let p = 0; p < numPublishers; p++) {
       const clientId = `pub-${p}`;
       const pubOptions = {
@@ -260,10 +270,12 @@ CSV report: ${csvReportPath}
       })
     );
     console.log('All publishers connected.');
+    // Small delay to ensure broker registration
+    await new Promise((r) => setTimeout(r, 2000));
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.3) PUBLISH MESSAGES + FORCE SUBSCRIBER OFFLINE MIDWAY
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log('Publishing messages…');
 
     let publishedCount = 0;
@@ -282,6 +294,9 @@ CSV report: ${csvReportPath}
 
         publishedCount++;
         if (!halfwayTriggered && publishedCount === halfwayCount) {
+          // Small delay to ensure broker registration
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 1000));
           halfwayTriggered = true;
           console.log(`\n*** Halfway (${publishedCount}/${totalMessages}). Disconnecting all subscribers…`);
           subscribers.forEach(({ clientId, client }) => {
@@ -319,14 +334,26 @@ CSV report: ${csvReportPath}
               });
               reSub.on('message', (_topic, payloadBuf) => {
                 const payload = payloadBuf.toString().trim();
-                const set = receivedMap.get(clientId);
-                set.add(payload);
-                console.log(`Subscriber ${clientId} (reconnected) RECEIVED: "${payload}"`);
+                const match = payload.match(/^MSG from (pub-\d+) #(\d+)$/);
+                if (match) {
+                  const pubId = match[1];
+                  const seq = match[2];
+                  const indexKey = `${pubId}:${seq}`;
+                  const set = receivedMap.get(clientId);
+                  set.add(indexKey);
+                  console.log(`Subscriber ${clientId} (reconnected) RECEIVED: "${payload}" (indexed as ${indexKey})`);
+                } else {
+                  const set = receivedMap.get(clientId);
+                  set.add(payload);
+                  console.log(`Subscriber ${clientId} (reconnected) RECEIVED unexpected format: "${payload}"`);
+                }
               });
 
               subscribers[i].client = reSub;
             }
           }, 3000);
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 1000));
         }
 
         // 200ms delay between publishes
@@ -337,16 +364,16 @@ CSV report: ${csvReportPath}
 
     console.log(`\nAll ${totalMessages} messages have been sent.`);
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.4) WAIT FOR HARD SESSION EXPIRY WINDOW
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     const waitTime = 8000; //Math.max(5000, (sessionExpiry + 5) * 1000);
     console.log(`\nWaiting ${waitTime / 1000}s for broker to deliver pending messages…`);
     await new Promise((r) => setTimeout(r, waitTime));
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.5) VERIFY THAT EACH SUBSCRIBER GOT ALL MESSAGES & BUILD CSV
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log('\nVerifying inflight message delivery…');
     const csvRows = [];
     let overallPass = true;
@@ -354,34 +381,53 @@ CSV report: ${csvReportPath}
     for (let i = 0; i < numSubs; i++) {
       const clientId = `sub-${i}`;
       const receivedSet = receivedMap.get(clientId);
-      const countReceived = receivedSet.size;
-      const missing = [];
+      const missingByPublisher = {};
+      let countReceived = 0;
 
-      // Reconstruct expected payloads
+      // Count how many valid indexed messages we saw
+      receivedSet.forEach((key) => {
+        if (/^pub-\d+:\d+$/.test(key)) {
+          countReceived++;
+        }
+      });
+
+      // Identify missing indices for each publisher
       for (let { clientId: pubId } of publishers) {
+        missingByPublisher[pubId] = [];
         for (let seq = 1; seq <= messagesPerPub; seq++) {
-          const expected = `MSG from ${pubId} #${seq}`;
-          if (!receivedSet.has(expected)) {
-            missing.push(expected);
+          const indexKey = `${pubId}:${seq}`;
+          if (!receivedSet.has(indexKey)) {
+            missingByPublisher[pubId].push(seq);
           }
         }
       }
 
-      const pass = missing.length === 0;
+      const totalReceived = countReceived;
+      const pass = Object.values(missingByPublisher).every((arr) => arr.length === 0);
       if (!pass) overallPass = false;
       console.log(
-        `Subscriber ${clientId}: received ${countReceived}/${totalMessages}` +
-          (pass ? ' → PASS' : ` → FAIL (missing ${missing.length})`)
+        `Subscriber ${clientId}: received ${totalReceived}/${totalMessages}` +
+          (pass ? ' → PASS' : ` → FAIL (missing ${Object.values(missingByPublisher).reduce((a, b) => a + b.length, 0)})`)
       );
+      if (!pass) {
+        for (const pubId of Object.keys(missingByPublisher)) {
+          if (missingByPublisher[pubId].length) {
+            console.log(
+              `  • Missing from ${pubId}: [${missingByPublisher[pubId].join(', ')}]`
+            );
+          }
+        }
+      }
 
       // Build CSV rows
       for (let { clientId: pubId } of publishers) {
         for (let seq = 1; seq <= messagesPerPub; seq++) {
-          const payload = `MSG from ${pubId} #${seq}`;
-          const status = receivedSet.has(payload) ? 'Pass' : 'Fail';
+          const indexKey = `${pubId}:${seq}`;
+          const status = receivedSet.has(indexKey) ? 'Pass' : 'Fail';
           csvRows.push({
             subscriber: clientId,
-            message: payload,
+            publisher: pubId,
+            index: seq,
             status,
           });
         }
@@ -394,26 +440,25 @@ CSV report: ${csvReportPath}
       } =====\n`
     );
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.6) WRITE CSV REPORT
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log(`Writing CSV report to ${csvReportPath}…`);
-    const fields = ['subscriber', 'message', 'status'];
+    const fields = ['subscriber', 'publisher', 'index', 'status'];
     const csvParser = new Parser({ fields });
     const csvOutput = csvParser.parse(csvRows);
     fs.writeFileSync(csvReportPath, csvOutput);
     console.log('CSV report generation complete.');
 
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     // 3.7) CLEAN UP ALL MQTT CONNECTIONS
-    // ——————————————————————————————————————————
+    // —————————————————————————————————————————————
     console.log('\nClosing all MQTT client connections…');
     await Promise.all(
       subscribers.map(
         ({ clientId, client }) =>
           new Promise((resolve) => {
             client.end(false, {}, () => {
-              // console.log(`  • Subscriber ${clientId} closed`);
               resolve();
             });
           })
@@ -424,7 +469,6 @@ CSV report: ${csvReportPath}
         ({ clientId, client }) =>
           new Promise((resolve) => {
             client.end(false, {}, () => {
-              // console.log(`  • Publisher ${clientId} closed`);
               resolve();
             });
           })
