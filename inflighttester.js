@@ -33,7 +33,7 @@ const argv = yargs(hideBin(process.argv))
     describe: 'QoS level (0, 1, or 2)',
     type: 'number',
     choices: [0, 1, 2],
-    default: 1,
+    default: 2,
   })
   .option('sessionExpiry', {
     describe: 'Session expiry interval (seconds) for subscribers',
@@ -43,12 +43,12 @@ const argv = yargs(hideBin(process.argv))
   .option('subs', {
     describe: 'Number of subscribers',
     type: 'number',
-    default: 40,
+    default: 2,
   })
   .option('publishers', {
     describe: 'Number of publishers',
     type: 'number',
-    default: 1,
+    default: 2,
   })
   .option('messagesPerPub', {
     describe: 'Number of messages per publisher',
@@ -115,7 +115,7 @@ async function runInflightTest() {
     const csvReportPath = argv.csvFile;
 
     const totalMessages = numPublishers * messagesPerPub;
-    const halfwayCount = Math.floor(totalMessages / 3);
+    const halfwayCount = Math.floor(totalMessages / 5);
 
     if (numSubs < 1 || numPublishers < 1) {
       console.error('Error: --subs and --publishers must both be ≥ 1.');
@@ -274,94 +274,103 @@ CSV report: ${csvReportPath}
     await new Promise((r) => setTimeout(r, 2000));
 
     // —————————————————————————————————————————————
-    // 3.3) PUBLISH MESSAGES + FORCE SUBSCRIBER OFFLINE MIDWAY
+    // 3.3) PUBLISH MESSAGES + FORCE SUBSCRIBER OFFLINE MIDWAY (PARALLEL)
     // —————————————————————————————————————————————
     console.log('Publishing messages…');
 
     let publishedCount = 0;
     let halfwayTriggered = false;
 
-    for (let { client: publisher, clientId } of publishers) {
-      for (let seq = 1; seq <= messagesPerPub; seq++) {
-        const payload = `MSG from ${clientId} #${seq}`;
-        publisher.publish(topic, payload, { qos, retain: false }, (err) => {
-          if (err) {
-            console.error(`Publish error for "${payload}":`, err.message);
-          } else {
-            console.log(`Publisher ${clientId} SENT: "${payload}"`);
-          }
-        });
-
-        publishedCount++;
-        if (!halfwayTriggered && publishedCount === halfwayCount) {
-          // Small delay to ensure broker registration
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, 1000));
-          halfwayTriggered = true;
-          console.log(`\n*** Halfway (${publishedCount}/${totalMessages}). Disconnecting all subscribers…`);
-          subscribers.forEach(({ clientId, client }) => {
-            client.end(false, {}, () => {
-              console.log(`Subscriber ${clientId} disconnected`);
-            });
+    // Run each publisher’s sequence in parallel
+    const publishPromises = publishers.map(({ client: publisher, clientId }) =>
+      (async () => {
+        for (let seq = 1; seq <= messagesPerPub; seq++) {
+          const payload = `MSG from ${clientId} #${seq}`;
+          publisher.publish(topic, payload, { qos, retain: false }, (err) => {
+            if (err) {
+              console.error(`Publish error for "${payload}":`, err.message);
+            } else {
+              console.log(`Publisher ${clientId} SENT: "${payload}"`);
+            }
           });
-          // Reconnect after short pause (within session expiry)
-          setTimeout(() => {
-            console.log('Reconnecting all subscribers…');
-            for (let i = 0; i < subscribers.length; i++) {
-              const { clientId } = subscribers[i];
-              const opts = {
-                clientId,
-                clean: false,
-                protocolVersion: 5,
-                properties: {
-                  sessionExpiryInterval: sessionExpiry,
-                  receiveMaximum: 65535,
-                },
-                username,
-                password,
-                reconnectPeriod: 5000,
-              };
-              const reSub = mqtt.connect(brokerUrl, opts);
-              attachClientLogging(reSub, 'SUB(reconnected)', clientId);
 
-              reSub.on('connect', () => {
-                console.log(`Subscriber ${clientId} reconnected—resubscribing to ${topic}`);
-                reSub.subscribe(topic, { qos }, (err) => {
-                  if (err) {
-                    console.error(`Re‐subscribe error for ${clientId}:`, err.message);
+          publishedCount++;
+          if (!halfwayTriggered && publishedCount === halfwayCount) {
+            // Ensure any in-flight QoS handshake can finish
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((r) => setTimeout(r, 1000));
+            halfwayTriggered = true;
+            console.log(`\n*** Halfway (${publishedCount}/${totalMessages}). Disconnecting all subscribers…`);
+            subscribers.forEach(({ clientId, client }) => {
+              client.end(false, {}, () => {
+                console.log(`Subscriber ${clientId} disconnected`);
+              });
+            });
+            // Reconnect after short pause (within session expiry)
+            setTimeout(() => {
+              console.log('Reconnecting all subscribers…');
+              for (let i = 0; i < subscribers.length; i++) {
+                const { clientId } = subscribers[i];
+                const opts = {
+                  clientId,
+                  clean: false,
+                  protocolVersion: 5,
+                  properties: {
+                    sessionExpiryInterval: sessionExpiry,
+                    receiveMaximum: 65535,
+                  },
+                  username,
+                  password,
+                  reconnectPeriod: 5000,
+                };
+                const reSub = mqtt.connect(brokerUrl, opts);
+                attachClientLogging(reSub, 'SUB(reconnected)', clientId);
+
+                reSub.on('connect', () => {
+                  console.log(`Subscriber ${clientId} reconnected—resubscribing to ${topic}`);
+                  reSub.subscribe(topic, { qos }, (err) => {
+                    if (err) {
+                      console.error(`Re‐subscribe error for ${clientId}:`, err.message);
+                    }
+                  });
+                });
+                reSub.on('message', (_topic, payloadBuf) => {
+                  const payload = payloadBuf.toString().trim();
+                  const match = payload.match(/^MSG from (pub-\d+) #(\d+)$/);
+                  if (match) {
+                    const pubId = match[1];
+                    const seq = match[2];
+                    const indexKey = `${pubId}:${seq}`;
+                    const set = receivedMap.get(clientId);
+                    set.add(indexKey);
+                    console.log(
+                      `Subscriber ${clientId} (reconnected) RECEIVED: "${payload}" (indexed as ${indexKey})`
+                    );
+                  } else {
+                    const set = receivedMap.get(clientId);
+                    set.add(payload);
+                    console.log(
+                      `Subscriber ${clientId} (reconnected) RECEIVED unexpected format: "${payload}"`
+                    );
                   }
                 });
-              });
-              reSub.on('message', (_topic, payloadBuf) => {
-                const payload = payloadBuf.toString().trim();
-                const match = payload.match(/^MSG from (pub-\d+) #(\d+)$/);
-                if (match) {
-                  const pubId = match[1];
-                  const seq = match[2];
-                  const indexKey = `${pubId}:${seq}`;
-                  const set = receivedMap.get(clientId);
-                  set.add(indexKey);
-                  console.log(`Subscriber ${clientId} (reconnected) RECEIVED: "${payload}" (indexed as ${indexKey})`);
-                } else {
-                  const set = receivedMap.get(clientId);
-                  set.add(payload);
-                  console.log(`Subscriber ${clientId} (reconnected) RECEIVED unexpected format: "${payload}"`);
-                }
-              });
 
-              subscribers[i].client = reSub;
-            }
-          }, 3000);
+                subscribers[i].client = reSub;
+              }
+            }, 3000);
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+
+          // 200ms delay between publishes
           // eslint-disable-next-line no-await-in-loop
-          await new Promise((r) => setTimeout(r, 1000));
+          await new Promise((r) => setTimeout(r, 200));
         }
+      })()
+    );
 
-        // 200ms delay between publishes
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    }
-
+    // Wait for all publishers to finish
+    await Promise.all(publishPromises);
     console.log(`\nAll ${totalMessages} messages have been sent.`);
 
     // —————————————————————————————————————————————
@@ -407,7 +416,9 @@ CSV report: ${csvReportPath}
       if (!pass) overallPass = false;
       console.log(
         `Subscriber ${clientId}: received ${totalReceived}/${totalMessages}` +
-          (pass ? ' → PASS' : ` → FAIL (missing ${Object.values(missingByPublisher).reduce((a, b) => a + b.length, 0)})`)
+          (pass
+            ? ' → PASS'
+            : ` → FAIL (missing ${Object.values(missingByPublisher).reduce((a, b) => a + b.length, 0)})`)
       );
       if (!pass) {
         for (const pubId of Object.keys(missingByPublisher)) {
