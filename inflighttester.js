@@ -115,7 +115,7 @@ async function runInflightTest() {
     const csvReportPath = argv.csvFile;
 
     const totalMessages = numPublishers * messagesPerPub;
-    const halfwayCount = Math.floor(totalMessages / 2);
+    const halfwayCount = Math.floor(totalMessages / 3);
 
     if (numSubs < 1 || numPublishers < 1) {
       console.error(
@@ -159,7 +159,7 @@ CSV report: ${csvReportPath}
         console.log(`${type} ${clientId} RECONNECTING...`);
       });
       client.on('close', () => {
-        console.log(`${type} ${clientId} CONNECTION CLOSED`);
+        // console.log(`${type} ${clientId} CONNECTION CLOSED`);
       });
       client.on('packetsend', (packet) => {
         // no-op
@@ -225,7 +225,7 @@ CSV report: ${csvReportPath}
     console.log('All subscribers are subscribed.');
 
     // Small delay to ensure broker registration
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     // ——————————————————————————————————————————
     // 3.2) CREATE PUBLISHERS
@@ -326,7 +326,7 @@ CSV report: ${csvReportPath}
 
               subscribers[i].client = reSub;
             }
-          }, 2000);
+          }, 3000);
         }
 
         // 200ms delay between publishes
@@ -340,7 +340,7 @@ CSV report: ${csvReportPath}
     // ——————————————————————————————————————————
     // 3.4) WAIT FOR HARD SESSION EXPIRY WINDOW
     // ——————————————————————————————————————————
-    const waitTime = 5000; //Math.max(5000, (sessionExpiry + 5) * 1000);
+    const waitTime = 8000; //Math.max(5000, (sessionExpiry + 5) * 1000);
     console.log(`\nWaiting ${waitTime / 1000}s for broker to deliver pending messages…`);
     await new Promise((r) => setTimeout(r, waitTime));
 
@@ -413,7 +413,7 @@ CSV report: ${csvReportPath}
         ({ clientId, client }) =>
           new Promise((resolve) => {
             client.end(false, {}, () => {
-              console.log(`  • Subscriber ${clientId} closed`);
+              // console.log(`  • Subscriber ${clientId} closed`);
               resolve();
             });
           })
@@ -424,7 +424,7 @@ CSV report: ${csvReportPath}
         ({ clientId, client }) =>
           new Promise((resolve) => {
             client.end(false, {}, () => {
-              console.log(`  • Publisher ${clientId} closed`);
+              // console.log(`  • Publisher ${clientId} closed`);
               resolve();
             });
           })
