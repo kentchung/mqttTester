@@ -52,7 +52,7 @@ const argv = yargs(hideBin(process.argv))
   .option('clientCount', {
     describe: 'Number of parallel subscribers to spawn',
     type: 'number',
-    default: 2000
+    default: 1000
   })
   .option('logMessages', {
     describe: 'Whether to output received messages (0=no, 1=yes)',
@@ -118,7 +118,7 @@ function startClient(index) {
     sessionReceived++;
 
     // Update summary file (non-blocking)
-    fs.writeFile(summaryFile, JSON.stringify({ total: globalTotal, session: globalSession }, null, 2), () => {});
+    //fs.writeFile(summaryFile, JSON.stringify({ total: globalTotal, session: globalSession }, null, 2), () => {});
 
     if (argv.logMessages === 1) {
       console.log(`📨 [${clientId}] ${topic} → ${payload.toString()}`);

@@ -24,16 +24,21 @@ const argv = yargs(hideBin(process.argv))
   .help()
   .argv;
 
-// ==== 2) Payload filler buffer (shared across publishers) ====
+// ==== 2) Helper delay function ====
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ==== 3) Payload filler buffer (shared across publishers) ====
 const filler = Buffer.alloc(Math.max(0, argv.payloadSize - 10), 'x');
 
-// ==== 3) Global stats ====
+// ==== 4) Global stats ====
 const startTime = Date.now();
 let totalPublished = 0;
 let totalAcked = 0;
 let totalFailed = 0;
 
-// ==== 4) Start a publisher client ====
+// ==== 5) Start a publisher client ====
 function startPublisher(index) {
   const clientId = `publisher-${index + 1}`;
   let nextMsg = 1;
@@ -62,12 +67,19 @@ function startPublisher(index) {
   client.on('error', err => console.error(`🔥 [${clientId}] Error:`, err.message));
 
   function scheduleNext() {
-    if (nextMsg > argv.numberMessages) return;
+    if (nextMsg > argv.numberMessages) {
+      setTimeout(() => {
+        client.end(() => {
+          console.log(`👋 [${clientId}] Finished and disconnected (post-delay)`);
+        });
+      }, 5000); // 🔁 5 second delay before clean shutdown
+      return;
+    }
 
-    const delay = getRandomDelayForRate(argv.rate); // per publisher rate
+    const delay = getRandomDelayForRate(argv.rate);
     setTimeout(() => {
       if (!client.connected) {
-        scheduleNext(); // try again later when connected
+        scheduleNext();
         return;
       }
 
@@ -93,10 +105,7 @@ function startPublisher(index) {
         totalPublished++;
         nextMsg++;
 
-        // Only schedule next if we're still under the limit
-        if (nextMsg <= argv.numberMessages) {
-          scheduleNext();
-        }
+        scheduleNext(); // continue sending
       });
     }, delay);
   }
@@ -111,7 +120,7 @@ function startPublisher(index) {
   };
 }
 
-// ==== 5) Utility: Get random delay to simulate message jitter (but still avg rate) ====
+// ==== 6) Utility: Get randomized interval to simulate jitter ====
 function getRandomDelayForRate(ratePerSecond) {
   const avgDelay = 1000 / ratePerSecond;
   const variance = avgDelay * 0.3;
@@ -120,13 +129,24 @@ function getRandomDelayForRate(ratePerSecond) {
   return Math.random() * (max - min) + min;
 }
 
-// ==== 6) Start all publishers ====
+// ==== 7) Start all publishers in staggered batches ====
 const publishers = [];
-for (let i = 0; i < argv.publisherCount; i++) {
-  publishers.push(startPublisher(i));
-}
+const batchSize = 20;
 
-// ==== 7) Stats Printer ====
+(async () => {
+  for (let i = 0; i < argv.publisherCount; i += batchSize) {
+    const end = Math.min(i + batchSize, argv.publisherCount);
+    console.log(`🚀 Launching publishers ${i + 1} to ${end}`);
+    for (let j = i; j < end; j++) {
+      publishers.push(startPublisher(j));
+    }
+    if (end < argv.publisherCount) {
+      await wait(500); // 🔁 500ms between batches
+    }
+  }
+})();
+
+// ==== 8) Stats Printer ====
 const statsInterval = setInterval(() => {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n⏱ ${elapsed}s — Attempts: ${totalPublished}, Acks: ${totalAcked}, Fails: ${totalFailed}`);
@@ -137,6 +157,6 @@ const statsInterval = setInterval(() => {
     publishers.forEach(p => {
       console.log(`📦 ${p.clientId}:`, p.getStats());
     });
-    process.exit(0);
+    // Allow clients to shut down themselves after 5s delay
   }
 }, argv.statsInterval * 1000);
